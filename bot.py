@@ -25,7 +25,11 @@ DATA_FILE = "data.json"
 # Твой Telegram user_id. Узнай его у @userinfobot, затем задай:
 #   export OWNER_ID=123456789
 # Или замени 0 напрямую в коде.
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+try:
+    OWNER_ID = int(os.getenv("OWNER_ID", "0").strip())
+except ValueError:
+    OWNER_ID = 0
+    logger.error("OWNER_ID задан неверно — проверь переменную окружения")
 
 
 # ─── Контроль доступа ──────────────────────────────────────────────────────────────────
@@ -1029,6 +1033,8 @@ def main():
     app.add_handler(CallbackQueryHandler(artists_callback, pattern="^artists_"))
 
     print("Бот запущен...")
+    print(f"OWNER_ID из переменной окружения: {repr(os.getenv('OWNER_ID'))}")
+    print(f"OWNER_ID после обработки: {OWNER_ID}")
     app.run_polling()
 
 
