@@ -289,10 +289,13 @@ async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Отправляем каждый ход отдельным сообщением (чтобы не упереться в лимит)
     await query.edit_message_text(f"Найдено ходов: {len(hods_sorted)}")
     for hod in hods_sorted:
-        keyboard = [[
+        buttons = [
             InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{hod['id']}"),
             InlineKeyboardButton("🎤 Артисты", callback_data=f"artists_{hod['id']}"),
-        ]]
+        ]
+        keyboard = [buttons]
+        if hod.get("status") == "confirmed" and hod.get("artists"):
+            keyboard.append([InlineKeyboardButton("📤 Отправить пак", callback_data=f"sendpack_{hod['id']}")])
         await query.message.reply_text(
             format_hod(hod, short=True),
             parse_mode="Markdown",
@@ -679,10 +682,66 @@ async def artists_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Ход не найден.")
         return
 
+    keyboard = None
+    if hod.get("status") == "confirmed" and hod.get("artists"):
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📤 Отправить пак", callback_data=f"sendpack_{hod['id']}")
+        ]])
+
     await query.edit_message_text(
         format_hod(hod),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=keyboard
     )
+
+
+
+# ─── Пак сообщений (/sendpack) ───────────────────────────────────────────────
+
+async def sendpack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    hod_id = int(query.data.replace("sendpack_", ""))
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod or not hod.get("artists"):
+        await query.message.reply_text("Нет артистов для отправки.")
+        return
+
+    # День недели на английском по дате хода
+    weekday_en = ""
+    if hod.get("date"):
+        try:
+            hod_date = datetime.strptime(hod["date"], "%d.%m.%Y")
+            weekday_en = hod_date.strftime("%A")  # Monday, Tuesday...
+        except ValueError:
+            pass
+
+    await query.message.reply_text(f"📤 Отправляю пак для хода #{hod_id}...")
+
+    for artist in hod["artists"]:
+        name = artist.get("name", "")
+        time_ = artist.get("time", "")
+        photo = artist.get("photo", "")
+
+        # Подпись: день недели, имя, время
+        parts = []
+        if weekday_en:
+            parts.append(weekday_en)
+        parts.append(name)
+        if time_:
+            parts.append(time_)
+        caption = " | ".join(parts)
+
+        if photo:
+            try:
+                await query.message.reply_photo(photo=photo, caption=caption)
+                continue
+            except Exception:
+                pass
+        # Если фото нет или не удалось отправить — только текст
+        await query.message.reply_text(caption)
 
 
 # ─── Редактирование артиста (/editartist) ────────────────────────────────────
@@ -1034,6 +1093,7 @@ def main():
     app.add_handler(CallbackQueryHandler(filter_callback, pattern="^filter_"))
     app.add_handler(CallbackQueryHandler(confirm_callback, pattern="^confirm_"))
     app.add_handler(CallbackQueryHandler(artists_callback, pattern="^artists_"))
+    app.add_handler(CallbackQueryHandler(sendpack_callback, pattern="^sendpack_"))
 
     print("Бот запущен...")
     print(f"OWNER_ID из переменной окружения: {repr(os.getenv('OWNER_ID'))}")
