@@ -618,12 +618,15 @@ async def artist_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def artist_social(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    val = update.message.text.strip()
+    val = (update.message.text or "").strip()
+    if not val:
+        await update.message.reply_text(
+            "Пожалуйста, отправь ссылку текстом. Или напиши пропустить."
+        )
+        return ARTIST_SOCIAL
     context.user_data["new_artist"]["social"] = "" if val.lower() in ("пропустить", "skip", "-") else val
     await update.message.reply_text(
-        "🖼 Отправь фото артиста (или 'пропустить'):\n"
-        "_Фото сохранится как file_id от Telegram_",
-        parse_mode="Markdown"
+        "🖼 Отправь фото артиста (или пропустить):",
     )
     return ARTIST_PHOTO
 
@@ -981,7 +984,7 @@ def main():
             ARTIST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_name)],
             ARTIST_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_time)],
             ARTIST_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_contact)],
-            ARTIST_SOCIAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_social)],
+            ARTIST_SOCIAL: [MessageHandler((filters.TEXT | filters.Entity("url") | filters.Entity("text_link")) & ~filters.COMMAND, artist_social)],
             ARTIST_PHOTO: [
                 MessageHandler(filters.PHOTO, artist_photo_file),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, artist_photo_text),
