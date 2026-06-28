@@ -1,0 +1,1036 @@
+"""
+Telegram-бот для управления музыкальной программой клуба.
+Хранит ходы (идеи/события) с лайнапом артистов.
+"""
+
+import os
+import json
+import logging
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ConversationHandler, ContextTypes, filters
+)
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+DATA_FILE = "data.json"
+
+# Твой Telegram user_id. Узнай его у @userinfobot, затем задай:
+#   export OWNER_ID=123456789
+# Или замени 0 напрямую в коде.
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+
+
+# ─── Контроль доступа ──────────────────────────────────────────────────────────────────
+
+def get_allowed_users(data: dict) -> set:
+    allowed = set(data.get("allowed_users", []))
+    if OWNER_ID:
+        allowed.add(OWNER_ID)
+    return allowed
+
+
+def is_allowed(user_id: int, data: dict) -> bool:
+    return user_id in get_allowed_users(data)
+
+
+def is_owner(user_id: int) -> bool:
+    return OWNER_ID != 0 and user_id == OWNER_ID
+
+
+def require_access(func):
+    """Декоратор: отклоняет команду если пользователь не в белом списке."""
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        data = load_data()
+        if not is_allowed(user.id, data):
+            await update.message.reply_text(
+                "⛔ У тебя нет доступа к этому боту.\n"
+                "Напиши администратору — он добавит тебя командой /adduser."
+            )
+            logger.warning(f"Отказ в доступе: {user.id} (@{user.username})")
+            return
+        return await func(update, context)
+    wrapper.__name__ = func.__name__
+    return wrapper
+
+
+# ─── Состояния диалогов ───────────────────────────────────────────────────────
+
+# Добавление хода
+ADD_DATE, ADD_LINEUP = range(2)
+
+# Редактирование хода
+EDIT_CHOOSE, EDIT_DATE, EDIT_LINEUP = range(10, 13)
+
+# Добавление артиста
+ARTIST_SELECT_HOD, ARTIST_NAME, ARTIST_TIME, ARTIST_CONTACT, ARTIST_SOCIAL, ARTIST_PHOTO, ARTIST_COMMENT = range(20, 27)
+
+# Редактирование артиста
+EDIT_ARTIST_SELECT_HOD, EDIT_ARTIST_SELECT, EDIT_ARTIST_FIELD, EDIT_ARTIST_VALUE = range(30, 34)
+
+# Расписание
+SCHED_PERIOD, SCHED_FROM, SCHED_TO = range(40, 43)
+
+# ─── Работа с данными ─────────────────────────────────────────────────────────
+
+def load_data() -> dict:
+    if not os.path.exists(DATA_FILE):
+        return {"hods": []}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_data(data: dict):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_next_id(data: dict) -> int:
+    if not data["hods"]:
+        return 1
+    return max(h["id"] for h in data["hods"]) + 1
+
+
+def find_hod(data: dict, hod_id: int) -> dict | None:
+    for h in data["hods"]:
+        if h["id"] == hod_id:
+            return h
+    return None
+
+
+def format_hod(hod: dict, short: bool = False) -> str:
+    status_emoji = {"abstract": "🌀", "idea": "💡", "lineup": "✏️", "confirmed": "✅"}
+    status_label = {"abstract": "Абстрактный", "idea": "Идея", "lineup": "Лайнап заполнен", "confirmed": "Подтверждён"}
+
+    emoji = status_emoji.get(hod["status"], "❓")
+    label = status_label.get(hod["status"], hod["status"])
+
+    date_str = hod.get("date") or "без даты"
+    lines = [
+        f"{emoji} *Ход #{hod['id']}* — {date_str}",
+        f"Статус: {label}",
+    ]
+
+    if hod.get("lineup"):
+        lines.append(f"Лайнап: {hod['lineup']}")
+
+    if not short and hod.get("artists"):
+        lines.append("\n🎤 *Артисты:*")
+        for a in hod["artists"]:
+            lines.append(f"  • *{a['name']}* {a.get('time', '')}".strip())
+            if a.get("contact"):
+                lines.append(f"    📞 {a['contact']}")
+            if a.get("social"):
+                lines.append(f"    🔗 {a['social']}")
+            if a.get("comment"):
+                lines.append(f"    💬 {a['comment']}")
+
+    lines.append(f"\n_Добавил: {hod['added_by']}_")
+    return "\n".join(lines)
+
+
+# ─── /start ───────────────────────────────────────────────────────────────────
+
+@require_access
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = (
+        "🎵 *Бот музыкальной программы клуба*\n\n"
+        "Команды:\n"
+        "  /newhod — добавить новый ход\n"
+        "  /list — список всех ходов\n"
+        "  /schedule — расписание по датам\n"
+        "  /confirm `<id>` — подтвердить ход\n"
+        "  /edit `<id>` — редактировать ход\n"
+        "  /addartist `<id>` — добавить артиста к ходу\n"
+        "  /editartist `<id>` — редактировать артиста\n"
+        "  /deleteartist `<id>` — удалить артиста\n"
+    )
+    if is_owner(user.id):
+        text += (
+            "\n👑 *Управление доступом:*\n"
+            "  /adduser `<id>` `[имя]` — добавить участника\n"
+            "  /removeuser `<id>` — убрать участника\n"
+            "  /listusers — список участников\n"
+        )
+    text += "\n  /myid — узнать свой Telegram ID"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ─── Добавление хода (/newhod) ────────────────────────────────────────────────
+
+@require_access
+async def newhod_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📅 Введи дату хода в формате ДД.ММ.ГГГГ\n"
+        "Например: 28.06.2025\n\n"
+        "Или напиши *пропустить* — ход попадёт в список абстрактных 🌀\n\n"
+        "/cancel — отмена",
+        parse_mode="Markdown"
+    )
+    return ADD_DATE
+
+
+async def newhod_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text.lower() in ("пропустить", "skip", "-"):
+        context.user_data["new_date"] = ""
+    else:
+        try:
+            datetime.strptime(text, "%d.%m.%Y")
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат. Введи дату (ДД.ММ.ГГГГ) или напиши *пропустить*:", parse_mode="Markdown")
+            return ADD_DATE
+        context.user_data["new_date"] = text
+
+    await update.message.reply_text(
+        "✏️ Введи лайнап (краткое описание программы).\n"
+        "Можно написать 'пропустить' и заполнить позже."
+    )
+    return ADD_LINEUP
+
+
+async def newhod_lineup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lineup = update.message.text.strip()
+    if lineup.lower() in ("пропустить", "skip", "-"):
+        lineup = ""
+
+    data = load_data()
+    date = context.user_data.get("new_date", "")
+    if not date:
+        status = "abstract"
+    elif not lineup:
+        status = "idea"
+    else:
+        status = "lineup"
+    hod = {
+        "id": get_next_id(data),
+        "date": date,
+        "lineup": lineup,
+        "status": status,
+        "artists": [],
+        "added_by": update.effective_user.full_name,
+        "created_at": datetime.now().isoformat(),
+    }
+    data["hods"].append(hod)
+    save_data(data)
+
+    await update.message.reply_text(
+        f"✅ Ход #{hod['id']} добавлен!\n\n{format_hod(hod)}",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+
+# ─── Список ходов (/list) ─────────────────────────────────────────────────────
+
+@require_access
+async def list_hods(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    if not data["hods"]:
+        await update.message.reply_text("Пока нет ни одного хода. Добавь первый: /newhod")
+        return
+
+    # Кнопки для фильтрации
+    keyboard = [
+        [
+            InlineKeyboardButton("Все", callback_data="filter_all"),
+            InlineKeyboardButton("🌀 Абстрактные", callback_data="filter_abstract"),
+        ],
+        [
+            InlineKeyboardButton("💡 Идеи", callback_data="filter_idea"),
+            InlineKeyboardButton("✏️ Лайнап", callback_data="filter_lineup"),
+            InlineKeyboardButton("✅ Подтверждённые", callback_data="filter_confirmed"),
+        ],
+    ]
+    await update.message.reply_text(
+        "Показать ходы:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = load_data()
+    filter_key = query.data.replace("filter_", "")
+
+    hods = data["hods"]
+    if filter_key != "all":
+        hods = [h for h in hods if h["status"] == filter_key]
+
+    if not hods:
+        await query.edit_message_text("Ходов с таким статусом нет.")
+        return
+
+    # Сортируем: конкретные по дате, абстрактные (без даты) в конец
+    def sort_key(h):
+        if h.get("date"):
+            try:
+                return (0, datetime.strptime(h["date"], "%d.%m.%Y"))
+            except Exception:
+                pass
+        return (1, datetime.min)
+    hods_sorted = sorted(hods, key=sort_key)
+
+    # Отправляем каждый ход отдельным сообщением (чтобы не упереться в лимит)
+    await query.edit_message_text(f"Найдено ходов: {len(hods_sorted)}")
+    for hod in hods_sorted:
+        keyboard = [[
+            InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{hod['id']}"),
+            InlineKeyboardButton("🎤 Артисты", callback_data=f"artists_{hod['id']}"),
+        ]]
+        await query.message.reply_text(
+            format_hod(hod, short=True),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+# ─── Расписание (/schedule) ───────────────────────────────────────────────────
+
+@require_access
+async def schedule_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("Эта неделя", callback_data="sched_week"),
+            InlineKeyboardButton("Этот месяц", callback_data="sched_month"),
+        ],
+        [
+            InlineKeyboardButton("Следующий месяц", callback_data="sched_nextmonth"),
+            InlineKeyboardButton("Свой период", callback_data="sched_custom"),
+        ],
+    ]
+    await update.message.reply_text(
+        "📅 За какой период показать расписание?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SCHED_PERIOD
+
+
+async def schedule_period_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    now = datetime.now()
+
+    if query.data == "sched_week":
+        from datetime import timedelta
+        date_from = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        date_to = date_from + timedelta(days=6)
+        await query.edit_message_text(
+            f"📅 Расписание на неделю: {date_from.strftime('%d.%m')} — {date_to.strftime('%d.%m.%Y')}"
+        )
+        await _send_schedule(query.message, date_from, date_to)
+        return ConversationHandler.END
+
+    elif query.data == "sched_month":
+        import calendar
+        date_from = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_day = calendar.monthrange(now.year, now.month)[1]
+        date_to = now.replace(day=last_day, hour=23, minute=59, second=59)
+        await query.edit_message_text(
+            f"📅 Расписание на {now.strftime('%B %Y')}"
+        )
+        await _send_schedule(query.message, date_from, date_to)
+        return ConversationHandler.END
+
+    elif query.data == "sched_nextmonth":
+        import calendar
+        if now.month == 12:
+            year, month = now.year + 1, 1
+        else:
+            year, month = now.year, now.month + 1
+        date_from = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+        last_day = calendar.monthrange(year, month)[1]
+        date_to = date_from.replace(day=last_day, hour=23, minute=59, second=59)
+        await query.edit_message_text(
+            f"📅 Расписание на следующий месяц ({date_from.strftime('%B %Y')})"
+        )
+        await _send_schedule(query.message, date_from, date_to)
+        return ConversationHandler.END
+
+    elif query.data == "sched_custom":
+        await query.edit_message_text(
+            "Введи дату начала периода (ДД.ММ.ГГГГ):\n\n/cancel — отмена"
+        )
+        return SCHED_FROM
+
+
+async def schedule_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        date_from = datetime.strptime(text, "%d.%m.%Y")
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат. Введи дату начала (ДД.ММ.ГГГГ):")
+        return SCHED_FROM
+
+    context.user_data["sched_from"] = date_from
+    await update.message.reply_text("Введи дату конца периода (ДД.ММ.ГГГГ):")
+    return SCHED_TO
+
+
+async def schedule_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        date_to = datetime.strptime(text, "%d.%m.%Y")
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат. Введи дату конца (ДД.ММ.ГГГГ):")
+        return SCHED_TO
+
+    date_from = context.user_data["sched_from"]
+    if date_to < date_from:
+        await update.message.reply_text("❌ Дата конца не может быть раньше даты начала. Введи ещё раз:")
+        return SCHED_TO
+
+    await update.message.reply_text(
+        f"📅 Расписание: {date_from.strftime('%d.%m.%Y')} — {date_to.strftime('%d.%m.%Y')}"
+    )
+    await _send_schedule(update.message, date_from, date_to)
+    return ConversationHandler.END
+
+
+async def _send_schedule(message, date_from: datetime, date_to: datetime):
+    """Вспомогательная функция: отфильтровать и отправить расписание."""
+    data = load_data()
+    confirmed = [h for h in data["hods"] if h["status"] == "confirmed"]
+
+    filtered = []
+    for hod in confirmed:
+        try:
+            hod_date = datetime.strptime(hod["date"], "%d.%m.%Y")
+            if date_from <= hod_date <= date_to:
+                filtered.append((hod_date, hod))
+        except ValueError:
+            continue
+
+    if not filtered:
+        await message.reply_text("За этот период подтверждённых выступлений нет.")
+        return
+
+    filtered.sort(key=lambda x: x[0])
+    await message.reply_text(f"Найдено выступлений: {len(filtered)}")
+    for _, hod in filtered:
+        await message.reply_text(format_hod(hod), parse_mode="Markdown")
+
+
+# ─── Подтверждение хода (/confirm) ───────────────────────────────────────────
+
+@require_access
+async def confirm_hod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /confirm <id>\nНапример: /confirm 3")
+        return
+
+    hod_id = int(args[0])
+    data = load_data()
+    hod = find_hod(data, hod_id)
+
+    if not hod:
+        await update.message.reply_text(f"❌ Ход #{hod_id} не найден.")
+        return
+
+    if not hod.get("date"):
+        await update.message.reply_text(
+            f"❌ Нельзя подтвердить абстрактный ход без даты.\n"
+            f"Сначала добавь дату: /edit {hod_id}"
+        )
+        return
+
+    hod["status"] = "confirmed"
+    hod["confirmed_by"] = update.effective_user.full_name
+    hod["confirmed_at"] = datetime.now().isoformat()
+    save_data(data)
+
+    await update.message.reply_text(
+        f"✅ Ход #{hod_id} подтверждён!\n\n{format_hod(hod)}",
+        parse_mode="Markdown"
+    )
+
+
+async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    hod_id = int(query.data.replace("confirm_", ""))
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await query.edit_message_text("Ход не найден.")
+        return
+
+    if not hod.get("date"):
+        await query.answer("Сначала добавь дату командой /edit", show_alert=True)
+        return
+
+    hod["status"] = "confirmed"
+    hod["confirmed_by"] = query.from_user.full_name
+    hod["confirmed_at"] = datetime.now().isoformat()
+    save_data(data)
+
+    await query.edit_message_text(
+        f"✅ Подтверждено!\n\n{format_hod(hod, short=True)}",
+        parse_mode="Markdown"
+    )
+
+
+# ─── Редактирование хода (/edit) ─────────────────────────────────────────────
+
+@require_access
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /edit <id>\nНапример: /edit 3")
+        return ConversationHandler.END
+
+    hod_id = int(args[0])
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await update.message.reply_text(f"❌ Ход #{hod_id} не найден.")
+        return ConversationHandler.END
+
+    context.user_data["edit_hod_id"] = hod_id
+    keyboard = [
+        [InlineKeyboardButton("📅 Дата", callback_data="edit_field_date"),
+         InlineKeyboardButton("✏️ Лайнап", callback_data="edit_field_lineup")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="edit_cancel")]
+    ]
+    await update.message.reply_text(
+        f"Редактируем ход #{hod_id}. Что изменить?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return EDIT_CHOOSE
+
+
+async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "edit_cancel":
+        await query.edit_message_text("Отмена.")
+        return ConversationHandler.END
+
+    field = query.data.replace("edit_field_", "")
+    context.user_data["edit_field"] = field
+
+    if field == "date":
+        await query.edit_message_text("Введи новую дату (ДД.ММ.ГГГГ):")
+        return EDIT_DATE
+    elif field == "lineup":
+        await query.edit_message_text("Введи новый лайнап:")
+        return EDIT_LINEUP
+
+
+async def edit_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        datetime.strptime(text, "%d.%m.%Y")
+    except ValueError:
+        await update.message.reply_text("❌ Неверный формат. Введи дату (ДД.ММ.ГГГГ):")
+        return EDIT_DATE
+
+    data = load_data()
+    hod = find_hod(data, context.user_data["edit_hod_id"])
+    was_abstract = hod.get("status") == "abstract"
+    hod["date"] = text
+    if was_abstract:
+        hod["status"] = "lineup" if hod.get("lineup") else "idea"
+        await update.message.reply_text(
+            f"✅ Дата добавлена: {text}\nХод переведён из абстрактного в конкретный!\n\n{format_hod(hod)}",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(f"✅ Дата обновлена: {text}")
+    save_data(data)
+    return ConversationHandler.END
+
+
+async def edit_lineup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    data = load_data()
+    hod = find_hod(data, context.user_data["edit_hod_id"])
+    hod["lineup"] = text
+    if hod["status"] == "idea":
+        hod["status"] = "lineup"
+    save_data(data)
+    await update.message.reply_text(f"✅ Лайнап обновлён.")
+    return ConversationHandler.END
+
+
+# ─── Добавление артиста (/addartist) ─────────────────────────────────────────
+
+@require_access
+async def addartist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /addartist <id>\nНапример: /addartist 3")
+        return ConversationHandler.END
+
+    hod_id = int(args[0])
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await update.message.reply_text(f"❌ Ход #{hod_id} не найден.")
+        return ConversationHandler.END
+
+    context.user_data["artist_hod_id"] = hod_id
+    context.user_data["new_artist"] = {}
+    await update.message.reply_text(
+        f"Добавляем артиста к ходу #{hod_id} ({hod['date']})\n\n"
+        "Введи имя артиста / название:"
+    )
+    return ARTIST_NAME
+
+
+async def artist_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_artist"]["name"] = update.message.text.strip()
+    await update.message.reply_text("🕐 Время выступления (например, 21:00). Или 'пропустить':")
+    return ARTIST_TIME
+
+
+async def artist_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    context.user_data["new_artist"]["time"] = "" if val.lower() in ("пропустить", "skip", "-") else val
+    await update.message.reply_text("📞 Контакт (телефон или Telegram). Или 'пропустить':")
+    return ARTIST_CONTACT
+
+
+async def artist_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    context.user_data["new_artist"]["contact"] = "" if val.lower() in ("пропустить", "skip", "-") else val
+    await update.message.reply_text("🔗 Ссылка на соцсети. Или 'пропустить':")
+    return ARTIST_SOCIAL
+
+
+async def artist_social(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    context.user_data["new_artist"]["social"] = "" if val.lower() in ("пропустить", "skip", "-") else val
+    await update.message.reply_text(
+        "🖼 Отправь фото артиста (или 'пропустить'):\n"
+        "_Фото сохранится как file_id от Telegram_",
+        parse_mode="Markdown"
+    )
+    return ARTIST_PHOTO
+
+
+async def artist_photo_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Если пользователь написал 'пропустить' вместо фото"""
+    context.user_data["new_artist"]["photo"] = ""
+    await update.message.reply_text("💬 Комментарий (особые условия, райдер и т.д.). Или 'пропустить':")
+    return ARTIST_COMMENT
+
+
+async def artist_photo_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Если пользователь отправил фото"""
+    photo = update.message.photo[-1]
+    context.user_data["new_artist"]["photo"] = photo.file_id
+    await update.message.reply_text("💬 Комментарий (особые условия, райдер и т.д.). Или 'пропустить':")
+    return ARTIST_COMMENT
+
+
+async def artist_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    context.user_data["new_artist"]["comment"] = "" if val.lower() in ("пропустить", "skip", "-") else val
+
+    data = load_data()
+    hod = find_hod(data, context.user_data["artist_hod_id"])
+    artist = context.user_data["new_artist"]
+    artist["added_by"] = update.effective_user.full_name
+    hod["artists"].append(artist)
+    save_data(data)
+
+    name = artist["name"]
+    time_ = artist.get("time", "")
+    await update.message.reply_text(
+        f"✅ Артист *{name}* {time_} добавлен к ходу #{hod['id']}!".strip(),
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+
+# ─── Просмотр артистов (callback) ────────────────────────────────────────────
+
+async def artists_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    hod_id = int(query.data.replace("artists_", ""))
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await query.edit_message_text("Ход не найден.")
+        return
+
+    await query.edit_message_text(
+        format_hod(hod),
+        parse_mode="Markdown"
+    )
+
+
+# ─── Редактирование артиста (/editartist) ────────────────────────────────────
+
+@require_access
+async def editartist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /editartist <id_хода>\nНапример: /editartist 3")
+        return ConversationHandler.END
+
+    hod_id = int(args[0])
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod or not hod.get("artists"):
+        await update.message.reply_text(f"Ход #{hod_id} не найден или у него нет артистов.")
+        return ConversationHandler.END
+
+    context.user_data["edit_artist_hod_id"] = hod_id
+    keyboard = [
+        [InlineKeyboardButton(f"{i+1}. {a['name']}", callback_data=f"ea_select_{i}")]
+        for i, a in enumerate(hod["artists"])
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="ea_cancel")])
+    await update.message.reply_text(
+        "Выбери артиста для редактирования:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return EDIT_ARTIST_SELECT
+
+
+async def editartist_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "ea_cancel":
+        await query.edit_message_text("Отмена.")
+        return ConversationHandler.END
+
+    idx = int(query.data.replace("ea_select_", ""))
+    context.user_data["edit_artist_idx"] = idx
+
+    keyboard = [
+        [InlineKeyboardButton("Имя", callback_data="ea_field_name"),
+         InlineKeyboardButton("Время", callback_data="ea_field_time")],
+        [InlineKeyboardButton("Контакт", callback_data="ea_field_contact"),
+         InlineKeyboardButton("Соцсети", callback_data="ea_field_social")],
+        [InlineKeyboardButton("Комментарий", callback_data="ea_field_comment")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="ea_cancel")]
+    ]
+    await query.edit_message_text(
+        "Что изменить?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return EDIT_ARTIST_FIELD
+
+
+async def editartist_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "ea_cancel":
+        await query.edit_message_text("Отмена.")
+        return ConversationHandler.END
+
+    field = query.data.replace("ea_field_", "")
+    context.user_data["edit_artist_field"] = field
+    labels = {"name": "имя", "time": "время", "contact": "контакт", "social": "соцсети", "comment": "комментарий"}
+    await query.edit_message_text(f"Введи новое значение для поля «{labels.get(field, field)}»:")
+    return EDIT_ARTIST_VALUE
+
+
+async def editartist_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    data = load_data()
+    hod = find_hod(data, context.user_data["edit_artist_hod_id"])
+    idx = context.user_data["edit_artist_idx"]
+    field = context.user_data["edit_artist_field"]
+    hod["artists"][idx][field] = val
+    save_data(data)
+    await update.message.reply_text(f"✅ Поле «{field}» обновлено.")
+    return ConversationHandler.END
+
+
+# ─── Удаление артиста (/deleteartist) ────────────────────────────────────────
+
+@require_access
+async def deleteartist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_text(
+            "Использование: /deleteartist <id_хода> <номер_артиста>\n"
+            "Например: /deleteartist 3 1\n\n"
+            "Номер артиста смотри в /list"
+        )
+        return
+
+    hod_id, artist_num = int(args[0]), int(args[1])
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await update.message.reply_text(f"❌ Ход #{hod_id} не найден.")
+        return
+
+    if artist_num < 1 or artist_num > len(hod["artists"]):
+        await update.message.reply_text(f"❌ Неверный номер артиста. В ходе #{hod_id} артистов: {len(hod['artists'])}")
+        return
+
+    removed = hod["artists"].pop(artist_num - 1)
+    save_data(data)
+    await update.message.reply_text(f"✅ Артист *{removed['name']}* удалён из хода #{hod_id}.", parse_mode="Markdown")
+
+
+
+
+# ─── Удаление хода (/deletehod) ────────────────────────────────────────────
+
+@require_access
+async def deletehod_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Использование: /deletehod <id>\nНапример: /deletehod 3")
+        return
+
+    hod_id = int(args[0])
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await update.message.reply_text(f"❌ Ход #{hod_id} не найден.")
+        return
+
+    date_str = hod.get("date") or "без даты"
+    lineup_str = f"\nЛайнап: {hod['lineup']}" if hod.get("lineup") else ""
+    artists_str = f"\nАртистов: {len(hod['artists'])}" if hod.get("artists") else ""
+
+    keyboard = [[
+        InlineKeyboardButton("🗑 Да, удалить", callback_data=f"deletehod_confirm_{hod_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="deletehod_cancel"),
+    ]]
+    await update.message.reply_text(
+        f"Удалить ход #{hod_id}?\n\n"
+        f"📅 {date_str}{lineup_str}{artists_str}\n\n"
+        "Это действие необратимо.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def deletehod_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "deletehod_cancel":
+        await query.edit_message_text("Отмена. Ход не удалён.")
+        return
+
+    hod_id = int(query.data.replace("deletehod_confirm_", ""))
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await query.edit_message_text("Ход не найден — возможно, уже удалён.")
+        return
+
+    data["hods"] = [h for h in data["hods"] if h["id"] != hod_id]
+    save_data(data)
+    await query.edit_message_text(f"🗑 Ход #{hod_id} удалён.")
+
+
+# ─── Управление доступом ─────────────────────────────────────────────────────
+
+async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Только владелец может добавлять пользователей."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Только администратор может добавлять пользователей.")
+        return
+
+    args = context.args
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text(
+            "Использование: /adduser <user_id> [имя]\n"
+            "Узнать свой id: @userinfobot\n\n"
+            "Например: /adduser 123456789 Маша"
+        )
+        return
+
+    user_id = int(args[0])
+    name = " ".join(args[1:]) if len(args) > 1 else str(user_id)
+
+    data = load_data()
+    if "allowed_users" not in data:
+        data["allowed_users"] = []
+    if "user_names" not in data:
+        data["user_names"] = {}
+
+    if user_id not in data["allowed_users"]:
+        data["allowed_users"].append(user_id)
+    data["user_names"][str(user_id)] = name
+    save_data(data)
+
+    await update.message.reply_text(f"✅ Пользователь *{name}* (id: `{user_id}`) добавлен.", parse_mode="Markdown")
+
+
+async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Только владелец может удалять пользователей."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Только администратор может удалять пользователей.")
+        return
+
+    args = context.args
+    if not args or not args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Использование: /removeuser <user_id>")
+        return
+
+    user_id = int(args[0])
+    data = load_data()
+    allowed = data.get("allowed_users", [])
+
+    if user_id not in allowed:
+        await update.message.reply_text(f"Пользователь {user_id} и так не в списке.")
+        return
+
+    allowed.remove(user_id)
+    data["allowed_users"] = allowed
+    name = data.get("user_names", {}).get(str(user_id), str(user_id))
+    save_data(data)
+    await update.message.reply_text(f"✅ Пользователь *{name}* удалён.", parse_mode="Markdown")
+
+
+async def listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Только владелец видит список участников."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Только администратор может просматривать список.")
+        return
+
+    data = load_data()
+    allowed = data.get("allowed_users", [])
+    names = data.get("user_names", {})
+
+    if not allowed:
+        await update.message.reply_text("Список пуст. Добавь участников командой /adduser.")
+        return
+
+    lines = ["👥 *Участники команды:*\n"]
+    for uid in allowed:
+        name = names.get(str(uid), "—")
+        lines.append(f"  • {name} — `{uid}`")
+    lines.append(f"\n_Итого: {len(allowed)}_")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Любой может узнать свой id — чтобы передать владельцу."""
+    user = update.effective_user
+    await update.message.reply_text(
+        f"Твой Telegram ID: `{user.id}`\n"
+        f"Имя: {user.full_name}\n\n"
+        "Отправь этот id администратору — он добавит тебя командой /adduser.",
+        parse_mode="Markdown"
+    )
+
+
+# ─── /cancel ─────────────────────────────────────────────────────────────────
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("Отменено.")
+    return ConversationHandler.END
+
+
+# ─── Запуск ──────────────────────────────────────────────────────────────────
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Диалог: добавление хода
+    add_hod_conv = ConversationHandler(
+        entry_points=[CommandHandler("newhod", newhod_start)],
+        states={
+            ADD_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newhod_date)],
+            ADD_LINEUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, newhod_lineup)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Диалог: редактирование хода
+    edit_hod_conv = ConversationHandler(
+        entry_points=[CommandHandler("edit", edit_start)],
+        states={
+            EDIT_CHOOSE: [CallbackQueryHandler(edit_field_callback, pattern="^edit_field_|^edit_cancel$")],
+            EDIT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_date)],
+            EDIT_LINEUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_lineup)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Диалог: добавление артиста
+    add_artist_conv = ConversationHandler(
+        entry_points=[CommandHandler("addartist", addartist_start)],
+        states={
+            ARTIST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_name)],
+            ARTIST_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_time)],
+            ARTIST_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_contact)],
+            ARTIST_SOCIAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_social)],
+            ARTIST_PHOTO: [
+                MessageHandler(filters.PHOTO, artist_photo_file),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, artist_photo_text),
+            ],
+            ARTIST_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_comment)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Диалог: редактирование артиста
+    edit_artist_conv = ConversationHandler(
+        entry_points=[CommandHandler("editartist", editartist_start)],
+        states={
+            EDIT_ARTIST_SELECT: [CallbackQueryHandler(editartist_select, pattern="^ea_select_|^ea_cancel$")],
+            EDIT_ARTIST_FIELD: [CallbackQueryHandler(editartist_field, pattern="^ea_field_|^ea_cancel$")],
+            EDIT_ARTIST_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, editartist_value)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Диалог: расписание
+    schedule_conv = ConversationHandler(
+        entry_points=[CommandHandler("schedule", schedule_start)],
+        states={
+            SCHED_PERIOD: [CallbackQueryHandler(schedule_period_callback, pattern="^sched_")],
+            SCHED_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_from)],
+            SCHED_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_to)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("list", list_hods))
+    app.add_handler(CommandHandler("confirm", confirm_hod))
+    app.add_handler(CommandHandler("deleteartist", deleteartist))
+    app.add_handler(CommandHandler("deletehod", deletehod_start))
+    app.add_handler(CallbackQueryHandler(deletehod_callback, pattern="^deletehod_"))
+    app.add_handler(CommandHandler("adduser", adduser))
+    app.add_handler(CommandHandler("removeuser", removeuser))
+    app.add_handler(CommandHandler("listusers", listusers))
+    app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(add_hod_conv)
+    app.add_handler(edit_hod_conv)
+    app.add_handler(add_artist_conv)
+    app.add_handler(edit_artist_conv)
+    app.add_handler(schedule_conv)
+    app.add_handler(CallbackQueryHandler(filter_callback, pattern="^filter_"))
+    app.add_handler(CallbackQueryHandler(confirm_callback, pattern="^confirm_"))
+    app.add_handler(CallbackQueryHandler(artists_callback, pattern="^artists_"))
+
+    print("Бот запущен...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
