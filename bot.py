@@ -772,7 +772,11 @@ async def _send_schedule(message, date_from: datetime, date_to: datetime):
 async def showhod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
-        await update.message.reply_text("Использование: /showhod <id>\nНапример: /showhod 3")
+        data = load_data()
+        await update.message.reply_text(
+            "Выбери ход:",
+            reply_markup=_hod_picker_keyboard(data, "pick_show_")
+        )
         return
 
     hod_id = int(args[0])
@@ -798,7 +802,19 @@ async def showhod(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_hod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
-        await update.message.reply_text("Использование: /confirm <id>\nНапример: /confirm 3")
+        data = load_data()
+        # Только конкретные (с датой, не подтверждённые)
+        confirmable = {h["id"]: h for h in data["hods"]
+                       if h.get("status") == "concrete" and h.get("date")}
+        if not confirmable:
+            await update.message.reply_text("Нет ходов готовых к подтверждению.")
+            return
+        await update.message.reply_text(
+            "Выбери ход для подтверждения:",
+            reply_markup=_hod_picker_keyboard(
+                {"hods": list(confirmable.values())}, "pick_confirm_"
+            )
+        )
         return
 
     hod_id = int(args[0])
@@ -859,7 +875,11 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
-        await update.message.reply_text("Использование: /edit <id>\nНапример: /edit 3")
+        data = load_data()
+        await update.message.reply_text(
+            "Выбери ход для редактирования:",
+            reply_markup=_hod_picker_keyboard(data, "pick_edit_")
+        )
         return ConversationHandler.END
 
     hod_id = int(args[0])
@@ -955,7 +975,11 @@ async def edit_lineup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addartist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
-        await update.message.reply_text("Использование: /addartist <id>\nНапример: /addartist 3")
+        data = load_data()
+        await update.message.reply_text(
+            "Выбери ход, к которому добавить артиста:",
+            reply_markup=_hod_picker_keyboard(data, "pick_addartist_")
+        )
         return ConversationHandler.END
 
     hod_id = int(args[0])
@@ -1035,6 +1059,45 @@ async def artist_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
     return ConversationHandler.END
+
+
+def _hod_picker_keyboard(data: dict, callback_prefix: str, only_with_artists: bool = False) -> InlineKeyboardMarkup:
+    """Строит клавиатуру выбора хода из актуальных ходов."""
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    hods = []
+    for h in data["hods"]:
+        if h.get("date"):
+            try:
+                if datetime.strptime(h["date"], "%d.%m.%Y") < today:
+                    continue
+            except ValueError:
+                pass
+        if only_with_artists and not h.get("artists"):
+            continue
+        hods.append(h)
+
+    def sort_key(h):
+        if h.get("date"):
+            try:
+                return (0, datetime.strptime(h["date"], "%d.%m.%Y"))
+            except Exception:
+                pass
+        return (1, datetime.min)
+    hods = sorted(hods, key=sort_key)
+
+    status_emoji = {"abstract": "🌀", "concrete": "📅", "confirmed": "✅"}
+    keyboard = []
+    for h in hods:
+        emoji = status_emoji.get(h.get("status", ""), "❓")
+        date_str = h.get("date") or "без даты"
+        lineup = h.get("lineup", "")
+        label = f"{emoji} #{h['id']} — {date_str}"
+        if lineup:
+            label += f" | {lineup[:20]}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"{callback_prefix}{h['id']}")])
+
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data=f"{callback_prefix}cancel")])
+    return InlineKeyboardMarkup(keyboard)
 
 # ─── Просмотр артистов (callback) ────────────────────────────────────────────
 
@@ -1116,7 +1179,11 @@ async def sendpack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def editartist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
-        await update.message.reply_text("Использование: /editartist <id_хода>\nНапример: /editartist 3")
+        data = load_data()
+        await update.message.reply_text(
+            "Выбери ход для редактирования артиста:",
+            reply_markup=_hod_picker_keyboard(data, "pick_editartist_", only_with_artists=True)
+        )
         return ConversationHandler.END
 
     hod_id = int(args[0])
@@ -1212,10 +1279,10 @@ async def editartist_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def deleteartist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        data = load_data()
         await update.message.reply_text(
-            "Использование: /deleteartist <id_хода> <номер_артиста>\n"
-            "Например: /deleteartist 3 1\n\n"
-            "Номер артиста смотри в /list"
+            "Выбери ход:",
+            reply_markup=_hod_picker_keyboard(data, "pick_deleteartist_", only_with_artists=True)
         )
         return
 
@@ -1241,7 +1308,15 @@ async def deleteartist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def deletehod_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args or not args[0].isdigit():
-        await update.message.reply_text("Использование: /deletehod <id>\nНапример: /deletehod 3")
+        data = load_data()
+        if not data["hods"]:
+            await update.message.reply_text("Нет ходов для удаления.")
+            return
+        # Показываем все ходы включая прошедшие
+        await update.message.reply_text(
+            "Выбери ход для удаления:",
+            reply_markup=_hod_picker_keyboard(data, "pick_deletehod_")
+        )
         return
 
     hod_id = int(args[0])
@@ -1434,6 +1509,195 @@ async def _periodic_sync():
         except Exception as e:
             logger.error(f"Ошибка плановой синхронизации: {e}")
 
+
+# ─── Обработчики пикера ходов ─────────────────────────────────────────────────
+
+async def pick_show_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("pick_show_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    context.args = [val]
+    context.user_data["_pick_message"] = query.message
+    await query.edit_message_text(f"Ход #{val}:")
+    hod_id = int(val)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await query.message.reply_text("Ход не найден.")
+        return
+    keyboard = []
+    if hod.get("status") == "confirmed" and hod.get("artists"):
+        keyboard.append([InlineKeyboardButton("📤 Отправить пак", callback_data=f"sendpack_{hod_id}")])
+    await query.message.reply_text(
+        format_hod(hod),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+    )
+
+
+async def pick_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("pick_edit_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    hod_id = int(val)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await query.edit_message_text("Ход не найден.")
+        return
+    context.user_data["edit_hod_id"] = hod_id
+    buttons = [
+        [InlineKeyboardButton("📅 Дата", callback_data="edit_field_date"),
+         InlineKeyboardButton("✏️ Лайнап", callback_data="edit_field_lineup")],
+    ]
+    if hod.get("date") and hod.get("status") != "confirmed":
+        buttons.append([InlineKeyboardButton("🌀 Убрать дату → сделать абстрактным", callback_data="edit_field_removedate")])
+    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="edit_cancel")])
+    await query.edit_message_text(
+        f"Редактируем ход #{hod_id}. Что изменить?",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def pick_addartist_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("pick_addartist_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    await query.edit_message_text(f"Добавляем артиста к ходу #{val}. Введи имя артиста:")
+    context.user_data["artist_hod_id"] = int(val)
+    context.user_data["new_artist"] = {}
+    # Продолжаем диалог addartist со следующего шага
+    context.user_data["_awaiting_artist_name"] = True
+
+
+async def pick_editartist_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("pick_editartist_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    hod_id = int(val)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod or not hod.get("artists"):
+        await query.edit_message_text("У этого хода нет артистов.")
+        return
+    context.user_data["edit_artist_hod_id"] = hod_id
+    keyboard = [
+        [InlineKeyboardButton(f"{i+1}. {a['name']}", callback_data=f"ea_select_{i}")]
+        for i, a in enumerate(hod["artists"])
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="ea_cancel")])
+    await query.edit_message_text(
+        "Выбери артиста для редактирования:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def pick_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("pick_confirm_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    hod_id = int(val)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await query.edit_message_text("Ход не найден.")
+        return
+    hod["status"] = "confirmed"
+    hod["confirmed_by"] = query.from_user.full_name
+    hod["confirmed_at"] = datetime.now().isoformat()
+    save_data(data)
+    sheets_upsert_hod(hod)
+    await query.edit_message_text(
+        f"✅ Ход #{hod_id} подтверждён!\n\n{format_hod(hod)}",
+        parse_mode="Markdown"
+    )
+
+
+async def pick_deletehod_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("pick_deletehod_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    hod_id = int(val)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod:
+        await query.edit_message_text("Ход не найден.")
+        return
+    date_str = hod.get("date") or "без даты"
+    lineup_str = f"\nЛайнап: {hod['lineup']}" if hod.get("lineup") else ""
+    artists_str = f"\nАртистов: {len(hod['artists'])}" if hod.get("artists") else ""
+    keyboard = [[
+        InlineKeyboardButton("🗑 Да, удалить", callback_data=f"deletehod_confirm_{hod_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="deletehod_cancel"),
+    ]]
+    await query.edit_message_text(
+        f"Удалить ход #{hod_id}?\n\n📅 {date_str}{lineup_str}{artists_str}\n\nЭто действие необратимо.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def pick_deleteartist_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: выбран ход — показываем список артистов."""
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("pick_deleteartist_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    hod_id = int(val)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod or not hod.get("artists"):
+        await query.edit_message_text("У этого хода нет артистов.")
+        return
+    keyboard = [
+        [InlineKeyboardButton(f"🗑 {a['name']}", callback_data=f"da_artist_{hod_id}_{i}")]
+        for i, a in enumerate(hod["artists"])
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="da_cancel")])
+    await query.edit_message_text(
+        f"Выбери артиста для удаления из хода #{hod_id}:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def da_artist_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: выбран артист — удаляем с подтверждением."""
+    query = update.callback_query
+    await query.answer()
+    if query.data == "da_cancel":
+        await query.edit_message_text("Отмена.")
+        return
+    _, _, hod_id_str, idx_str = query.data.split("_", 3)
+    hod_id, idx = int(hod_id_str), int(idx_str)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod or idx >= len(hod["artists"]):
+        await query.edit_message_text("Артист не найден.")
+        return
+    removed = hod["artists"].pop(idx)
+    save_data(data)
+    sheets_sync_artists(hod)
+    await query.edit_message_text(f"✅ Артист *{removed['name']}* удалён из хода #{hod_id}.", parse_mode="Markdown")
+
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -1522,6 +1786,14 @@ def main():
     app.add_handler(CallbackQueryHandler(filter_callback, pattern="^filter_"))
     app.add_handler(CallbackQueryHandler(confirm_callback, pattern="^confirm_"))
     app.add_handler(CallbackQueryHandler(artists_callback, pattern="^artists_"))
+    app.add_handler(CallbackQueryHandler(pick_show_callback, pattern="^pick_show_"))
+    app.add_handler(CallbackQueryHandler(pick_edit_callback, pattern="^pick_edit_"))
+    app.add_handler(CallbackQueryHandler(pick_addartist_callback, pattern="^pick_addartist_"))
+    app.add_handler(CallbackQueryHandler(pick_editartist_callback, pattern="^pick_editartist_"))
+    app.add_handler(CallbackQueryHandler(pick_confirm_callback, pattern="^pick_confirm_"))
+    app.add_handler(CallbackQueryHandler(pick_deletehod_callback, pattern="^pick_deletehod_"))
+    app.add_handler(CallbackQueryHandler(pick_deleteartist_callback, pattern="^pick_deleteartist_"))
+    app.add_handler(CallbackQueryHandler(da_artist_callback, pattern="^da_artist_|^da_cancel$"))
     app.add_handler(CallbackQueryHandler(sendpack_callback, pattern="^sendpack_"))
     # Кнопки клавиатуры — последними, чтобы не перехватывать текст во время диалогов
     app.add_handler(MessageHandler(
