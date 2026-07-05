@@ -13,7 +13,7 @@ from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ConversationHandler, ContextTypes, filters, JobQueue
+    MessageHandler, ConversationHandler, ContextTypes, filters
 )
 
 logging.basicConfig(
@@ -1419,17 +1419,20 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Периодическая синхронизация из Google Sheets ────────────────────────────
 
-async def job_sync_from_sheets(context: ContextTypes.DEFAULT_TYPE):
-    """Запускается каждые 6 часов — читает таблицу и обновляет data.json."""
-    logger.info("Запуск плановой синхронизации из Google Sheets...")
-    try:
-        restored = sheets_restore_to_json()
-        if restored:
-            logger.info("Плановая синхронизация завершена успешно.")
-        else:
-            logger.info("Плановая синхронизация: таблица пуста или недоступна.")
-    except Exception as e:
-        logger.error(f"Ошибка плановой синхронизации: {e}")
+async def _periodic_sync():
+    """Фоновая задача: каждые 6 часов читает таблицу и обновляет data.json."""
+    import asyncio
+    while True:
+        await asyncio.sleep(6 * 60 * 60)
+        logger.info("Запуск плановой синхронизации из Google Sheets...")
+        try:
+            restored = sheets_restore_to_json()
+            if restored:
+                logger.info("Плановая синхронизация завершена успешно.")
+            else:
+                logger.info("Плановая синхронизация: таблица пуста или недоступна.")
+        except Exception as e:
+            logger.error(f"Ошибка плановой синхронизации: {e}")
 
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
@@ -1542,11 +1545,9 @@ def main():
     # Синхронизируем таблицу при старте
     sheets_full_sync(current_data)
     # Запускаем обратную синхронизацию каждые 6 часов
-    app.job_queue.run_repeating(
-        job_sync_from_sheets,
-        interval=6 * 60 * 60,  # 6 часов в секундах
-        first=6 * 60 * 60,    # первый запуск через 6 часов после старта
-    )
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.create_task(_periodic_sync())
     app.run_polling()
 
 if __name__ == "__main__":
