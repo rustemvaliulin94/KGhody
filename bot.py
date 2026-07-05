@@ -337,7 +337,7 @@ EDIT_CHOOSE, EDIT_DATE, EDIT_LINEUP = range(10, 13)
 ARTIST_SELECT_HOD, ARTIST_NAME, ARTIST_TIME, ARTIST_CONTACT, ARTIST_SOCIAL, ARTIST_PHOTO, ARTIST_COMMENT = range(20, 27)
 
 # Редактирование артиста
-EDIT_ARTIST_SELECT_HOD, EDIT_ARTIST_SELECT, EDIT_ARTIST_FIELD, EDIT_ARTIST_VALUE, EDIT_ARTIST_PHOTO = range(30, 35)
+EDIT_ARTIST_SELECT_HOD, EDIT_ARTIST_SELECT, EDIT_ARTIST_FIELD, EDIT_ARTIST_VALUE, EDIT_ARTIST_PHOTO, EDIT_ARTIST_HOD_PICK = range(30, 36)
 
 # Расписание
 SCHED_PERIOD, SCHED_FROM, SCHED_TO = range(40, 43)
@@ -1182,9 +1182,9 @@ async def editartist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_data()
         await update.message.reply_text(
             "Выбери ход для редактирования артиста:",
-            reply_markup=_hod_picker_keyboard(data, "pick_editartist_", only_with_artists=True)
+            reply_markup=_hod_picker_keyboard(data, "ea_hod_", only_with_artists=True)
         )
-        return ConversationHandler.END
+        return EDIT_ARTIST_HOD_PICK
 
     hod_id = int(args[0])
     data = load_data()
@@ -1200,6 +1200,33 @@ async def editartist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="ea_cancel")])
     await update.message.reply_text(
+        "Выбери артиста для редактирования:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return EDIT_ARTIST_SELECT
+
+
+async def editartist_hod_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор хода внутри диалога редактирования артиста."""
+    query = update.callback_query
+    await query.answer()
+    val = query.data.replace("ea_hod_", "")
+    if val == "cancel":
+        await query.edit_message_text("Отмена.")
+        return ConversationHandler.END
+    hod_id = int(val)
+    data = load_data()
+    hod = find_hod(data, hod_id)
+    if not hod or not hod.get("artists"):
+        await query.edit_message_text("У этого хода нет артистов.")
+        return ConversationHandler.END
+    context.user_data["edit_artist_hod_id"] = hod_id
+    keyboard = [
+        [InlineKeyboardButton(f"{i+1}. {a['name']}", callback_data=f"ea_select_{i}")]
+        for i, a in enumerate(hod["artists"])
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="ea_cancel")])
+    await query.edit_message_text(
         "Выбери артиста для редактирования:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1745,6 +1772,7 @@ def main():
     edit_artist_conv = ConversationHandler(
         entry_points=[CommandHandler("editartist", editartist_start)],
         states={
+            EDIT_ARTIST_HOD_PICK: [CallbackQueryHandler(editartist_hod_pick, pattern="^ea_hod_")],
             EDIT_ARTIST_SELECT: [CallbackQueryHandler(editartist_select, pattern="^ea_select_|^ea_cancel$")],
             EDIT_ARTIST_FIELD: [CallbackQueryHandler(editartist_field, pattern="^ea_field_|^ea_cancel$")],
             EDIT_ARTIST_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, editartist_value)],
