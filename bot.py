@@ -415,6 +415,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_access
 async def newhod_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["_in_conversation"] = True
     await update.message.reply_text(
         "📅 Введи дату хода в формате ДД.ММ.ГГГГ\n"
         "Например: 28.06.2025\n\n"
@@ -1488,6 +1489,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_access
 async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Не обрабатываем если пользователь в активном диалоге
+    if context.user_data.get("_in_conversation"):
+        return
     text = update.message.text
 
     if text == "➕ Новый ход":
@@ -1738,6 +1742,7 @@ def main():
             ADD_LINEUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, newhod_lineup)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     # Диалог: редактирование хода
@@ -1749,6 +1754,7 @@ def main():
             EDIT_LINEUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_lineup)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     # Диалог: добавление артиста
@@ -1766,6 +1772,7 @@ def main():
             ARTIST_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, artist_comment)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     # Диалог: редактирование артиста
@@ -1779,6 +1786,7 @@ def main():
             EDIT_ARTIST_PHOTO: [MessageHandler(filters.PHOTO, editartist_photo)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     # Диалог: расписание
@@ -1790,6 +1798,7 @@ def main():
             SCHED_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_to)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     # ConversationHandler-ы первыми — они перехватывают сообщения во время диалога
@@ -1827,7 +1836,7 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex("^(➕ Новый ход|📋 Список ходов|📅 Расписание|🎤 Управление артистами|➕ Добавить артиста|✏️ Редактировать артиста|🗑 Удалить артиста|◀️ Назад)$"),
         keyboard_handler
-    ))
+    ), group=1)
 
     print("Бот запущен...")
     print(f"OWNER_ID из переменной окружения: {repr(os.getenv('OWNER_ID'))}")
