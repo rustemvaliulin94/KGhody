@@ -1749,7 +1749,7 @@ def main():
     edit_hod_conv = ConversationHandler(
         entry_points=[CommandHandler("edit", edit_start)],
         states={
-            EDIT_CHOOSE: [CallbackQueryHandler(edit_field_callback, pattern="^edit_field_|^edit_cancel$", per_message=False)],
+            EDIT_CHOOSE: [CallbackQueryHandler(edit_field_callback, pattern="^edit_field_|^edit_cancel$")],
             EDIT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_date)],
             EDIT_LINEUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_lineup)],
         },
@@ -1779,9 +1779,9 @@ def main():
     edit_artist_conv = ConversationHandler(
         entry_points=[CommandHandler("editartist", editartist_start)],
         states={
-            EDIT_ARTIST_HOD_PICK: [CallbackQueryHandler(editartist_hod_pick, pattern="^ea_hod_", per_message=False)],
-            EDIT_ARTIST_SELECT: [CallbackQueryHandler(editartist_select, pattern="^ea_select_|^ea_cancel$", per_message=False)],
-            EDIT_ARTIST_FIELD: [CallbackQueryHandler(editartist_field, pattern="^ea_field_|^ea_cancel$", per_message=False)],
+            EDIT_ARTIST_HOD_PICK: [CallbackQueryHandler(editartist_hod_pick, pattern="^ea_hod_")],
+            EDIT_ARTIST_SELECT: [CallbackQueryHandler(editartist_select, pattern="^ea_select_|^ea_cancel$")],
+            EDIT_ARTIST_FIELD: [CallbackQueryHandler(editartist_field, pattern="^ea_field_|^ea_cancel$")],
             EDIT_ARTIST_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, editartist_value)],
             EDIT_ARTIST_PHOTO: [MessageHandler(filters.PHOTO, editartist_photo)],
         },
@@ -1793,7 +1793,7 @@ def main():
     schedule_conv = ConversationHandler(
         entry_points=[CommandHandler("schedule", schedule_start)],
         states={
-            SCHED_PERIOD: [CallbackQueryHandler(schedule_period_callback, pattern="^sched_", per_message=False)],
+            SCHED_PERIOD: [CallbackQueryHandler(schedule_period_callback, pattern="^sched_")],
             SCHED_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_from)],
             SCHED_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_to)],
         },
