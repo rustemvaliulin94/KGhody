@@ -95,13 +95,13 @@ def _ensure_worksheets(spreadsheet):
         ws_hods = spreadsheet.worksheet("Ходы")
     except Exception:
         ws_hods = spreadsheet.add_worksheet(title="Ходы", rows=1000, cols=10)
-        ws_hods.update("A1", [["ID", "Дата", "Лайнап", "Статус", "Добавил", "Дата создания"]])
+        ws_hods.update(range_name="A1", values=[["ID", "Дата", "Лайнап", "Статус", "Добавил", "Дата создания"]])
 
     try:
         ws_artists = spreadsheet.worksheet("Артисты")
     except Exception:
         ws_artists = spreadsheet.add_worksheet(title="Артисты", rows=1000, cols=10)
-        ws_artists.update("A1", [["ID хода", "Дата хода", "Имя", "Время", "Контакт", "Соцсети", "Комментарий", "Добавил"]])
+        ws_artists.update(range_name="A1", values=[["ID хода", "Дата хода", "Имя", "Время", "Контакт", "Соцсети", "Комментарий", "Добавил"]])
 
     return ws_hods, ws_artists
 
@@ -126,7 +126,7 @@ def sheets_upsert_hod(hod: dict):
         hod_id_str = str(hod.get("id", ""))
         if hod_id_str in col_ids:
             row_num = col_ids.index(hod_id_str) + 1
-            ws_hods.update(f"A{row_num}", [_hod_row(hod)])
+            ws_hods.update(range_name=f"A{row_num}", values=[_hod_row(hod)])
         else:
             ws_hods.append_row(_hod_row(hod))
     except Exception as e:
@@ -205,9 +205,9 @@ def sheets_full_sync(data: dict):
                 ])
 
         ws_hods.clear()
-        ws_hods.update("A1", hods_rows)
+        ws_hods.update(range_name="A1", values=hods_rows)
         ws_artists.clear()
-        ws_artists.update("A1", artists_rows)
+        ws_artists.update(range_name="A1", values=artists_rows)
     except Exception as e:
         logging.getLogger(__name__).error(f"sheets_full_sync error: {e}")
 
@@ -1749,7 +1749,7 @@ def main():
     edit_hod_conv = ConversationHandler(
         entry_points=[CommandHandler("edit", edit_start)],
         states={
-            EDIT_CHOOSE: [CallbackQueryHandler(edit_field_callback, pattern="^edit_field_|^edit_cancel$")],
+            EDIT_CHOOSE: [CallbackQueryHandler(edit_field_callback, pattern="^edit_field_|^edit_cancel$", per_message=False)],
             EDIT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_date)],
             EDIT_LINEUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_lineup)],
         },
@@ -1779,9 +1779,9 @@ def main():
     edit_artist_conv = ConversationHandler(
         entry_points=[CommandHandler("editartist", editartist_start)],
         states={
-            EDIT_ARTIST_HOD_PICK: [CallbackQueryHandler(editartist_hod_pick, pattern="^ea_hod_")],
-            EDIT_ARTIST_SELECT: [CallbackQueryHandler(editartist_select, pattern="^ea_select_|^ea_cancel$")],
-            EDIT_ARTIST_FIELD: [CallbackQueryHandler(editartist_field, pattern="^ea_field_|^ea_cancel$")],
+            EDIT_ARTIST_HOD_PICK: [CallbackQueryHandler(editartist_hod_pick, pattern="^ea_hod_", per_message=False)],
+            EDIT_ARTIST_SELECT: [CallbackQueryHandler(editartist_select, pattern="^ea_select_|^ea_cancel$", per_message=False)],
+            EDIT_ARTIST_FIELD: [CallbackQueryHandler(editartist_field, pattern="^ea_field_|^ea_cancel$", per_message=False)],
             EDIT_ARTIST_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, editartist_value)],
             EDIT_ARTIST_PHOTO: [MessageHandler(filters.PHOTO, editartist_photo)],
         },
@@ -1793,7 +1793,7 @@ def main():
     schedule_conv = ConversationHandler(
         entry_points=[CommandHandler("schedule", schedule_start)],
         states={
-            SCHED_PERIOD: [CallbackQueryHandler(schedule_period_callback, pattern="^sched_")],
+            SCHED_PERIOD: [CallbackQueryHandler(schedule_period_callback, pattern="^sched_", per_message=False)],
             SCHED_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_from)],
             SCHED_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_to)],
         },
